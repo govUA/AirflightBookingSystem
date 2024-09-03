@@ -1,0 +1,3 @@
+C:/Users/Alyona/CLionProjects/AirflightBookingSystem/cmake-build-debug/CMakeFiles/AirflightBookingSystem.dir
+C:/Users/Alyona/CLionProjects/AirflightBookingSystem/cmake-build-debug/CMakeFiles/edit_cache.dir
+C:/Users/Alyona/CLionProjects/AirflightBookingSystem/cmake-build-debug/CMakeFiles/rebuild_cache.dir
