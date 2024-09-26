@@ -7,6 +7,63 @@
 #include <sstream>
 #include <random>
 #include <algorithm>
+#include <windows.h>
+
+class FileRAII {
+private:
+    HANDLE fileHandle;
+public:
+    FileRAII(const char *filePath, DWORD desiredAccess, DWORD shareMode, DWORD creationDisposition) {
+        fileHandle = CreateFile(filePath, desiredAccess, shareMode, NULL, creationDisposition, FILE_ATTRIBUTE_NORMAL,
+                                NULL);
+        if (fileHandle == INVALID_HANDLE_VALUE) {
+            throw std::runtime_error("Failed to open file");
+        }
+        std::cout << "File opened successfully\n";
+    }
+
+    ~FileRAII() {
+        if (fileHandle != INVALID_HANDLE_VALUE) {
+            CloseHandle(fileHandle);
+            std::cout << "File closed automatically\n";
+        }
+    }
+
+    DWORD readData(char *buffer, DWORD numBytesToRead) {
+        DWORD bytesRead;
+        if (!ReadFile(fileHandle, buffer, numBytesToRead, &bytesRead, NULL)) {
+            throw std::runtime_error("Failed to read from file");
+        }
+        return bytesRead;
+    }
+
+    DWORD writeData(const char *buffer, DWORD numBytesToWrite) {
+        DWORD bytesWritten;
+        if (!WriteFile(fileHandle, buffer, numBytesToWrite, &bytesWritten, NULL)) {
+            throw std::runtime_error("Failed to write to file");
+        }
+        return bytesWritten;
+    }
+
+    FileRAII(const FileRAII &) = delete;
+
+    FileRAII &operator=(const FileRAII &) = delete;
+
+    FileRAII(FileRAII &&other) noexcept: fileHandle(other.fileHandle) {
+        other.fileHandle = INVALID_HANDLE_VALUE;
+    }
+
+    FileRAII &operator=(FileRAII &&other) noexcept {
+        if (this != &other) {
+            if (fileHandle != INVALID_HANDLE_VALUE) {
+                CloseHandle(fileHandle);
+            }
+            fileHandle = other.fileHandle;
+            other.fileHandle = INVALID_HANDLE_VALUE;
+        }
+        return *this;
+    }
+};
 
 std::string generateTicketId() {
     std::string id = "T-";
@@ -127,7 +184,6 @@ public:
         auto seatTuple = std::make_tuple(seatRow, seatNum);
 
         if (seats.find(seatTuple) == seats.end() || seats[seatTuple]) {
-            std::cout << "Seat is unavailable!\n" << std::endl;
             return "";
         }
 
@@ -174,13 +230,13 @@ public:
         return "Information for booking " + ticketId + ":\n\n" + bookedTickets.at(ticketId).getInfo();
     }
 
-    std::string viewUserBookings(const std::string &username) {
-        if (userTickets.find(username) == userTickets.end() || userTickets[username].empty()) {
+    std::string viewUserBookings(const std::string &username) const {
+        if (userTickets.find(username) == userTickets.end() || userTickets.at(username).empty()) {
             return "";
         }
 
         std::string result;
-        for (const Ticket &ticket: userTickets[username]) {
+        for (const Ticket &ticket: userTickets.at(username)) {
             result += ticket.getInfo() + "\n";
         }
         return result;
@@ -208,18 +264,29 @@ private:
     std::vector<std::string> flights;
 public:
     FileReader(const std::string &filePath) {
-        std::ifstream configFile(filePath);
-        std::string flight;
-        if (configFile.is_open()) {
-            std::getline(configFile, flight);
-            while (std::getline(configFile, flight)) {
-                if (!flight.empty()) {
-                    flights.push_back(flight);
+        try {
+            FileRAII file(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING);
+
+            char buffer[512];
+            DWORD bytesRead = 0;
+            std::string fileContent;
+
+            while ((bytesRead = file.readData(buffer, sizeof(buffer) - 1)) > 0) {
+                buffer[bytesRead] = '\0';
+                fileContent += buffer;
+            }
+
+            std::istringstream iss(fileContent);
+            std::string line;
+            std::getline(iss, line);
+            while (std::getline(iss, line)) {
+                if (!line.empty()) {
+                    flights.push_back(line);
                 }
             }
-            configFile.close();
-        } else {
-            std::cerr << "Error opening file" << std::endl;
+
+        } catch (const std::exception &e) {
+            std::cerr << e.what() << std::endl;
         }
         flights.shrink_to_fit();
     }
@@ -229,9 +296,179 @@ public:
     }
 };
 
+class CLI {
+private:
+    std::map<std::string, Airplane> flights;
+    bool running = true;
+
+public:
+    CLI(const std::vector<std::string> &flightData) {
+        std::cout << "Flights:\n" << std::endl;
+        for (const auto &data: flightData) {
+            Airplane airplane(data);
+            std::istringstream iss(data);
+            std::string date, id;
+            iss >> date >> id;
+            flights.emplace(id + date, airplane);
+            std::cout << data << std::endl;
+        }
+        std::cout << std::endl;
+        showHelp();
+    }
+
+    void executeCommand(const std::string &command) {
+        std::istringstream iss(command);
+        std::string action;
+        iss >> action;
+
+        if (action == "check") {
+            std::string flightDate, flightId;
+            iss >> flightDate >> flightId;
+            checkAvailableSeats(flightDate, flightId);
+
+        } else if (action == "book") {
+            std::string flightDate, flightId, seat, username;
+            iss >> flightDate >> flightId >> seat >> username;
+            bookSeat(flightDate, flightId, seat, username);
+
+        } else if (action == "return") {
+            std::string ticketId;
+            iss >> ticketId;
+            returnTicket(ticketId);
+
+        } else if (action == "view") {
+            std::string param1, param2;
+            iss >> param1;
+            if (iss >> param2) {
+                if (param1 == "username") {
+                    viewUserBookings(param2);
+                } else {
+                    viewFlightBookings(param1, param2);
+                }
+            } else {
+                viewTicket(param1);
+            }
+        } else if (action == "help") {
+            showHelp();
+
+        } else if (action == "exit") {
+            running = false;
+
+        } else {
+            std::cout << "Unknown command! Type 'help' for a list of available commands." << std::endl;
+        }
+    }
+
+    bool isRunning() const {
+        return running;
+    }
+
+
+private:
+
+    void checkAvailableSeats(const std::string &flightDate, const std::string &flightId) {
+        std::string key = flightId + flightDate;
+        if (flights.find(key) != flights.end()) {
+            std::cout << flights.at(key).getAvailableSeats() << std::endl;
+        } else {
+            std::cout << "Flight not found!" << std::endl;
+        }
+    }
+
+    void bookSeat(const std::string &flightDate, const std::string &flightId, const std::string &seat,
+                  const std::string &username) {
+        std::string key = flightId + flightDate;
+        if (flights.find(key) != flights.end()) {
+            std::string ticketId = flights.at(key).book(seat, username);
+            if (!ticketId.empty()) {
+                std::cout << "Ticket booked successfully: " << ticketId << std::endl;
+            }
+        } else {
+            std::cout << "Flight not found!" << std::endl;
+        }
+    }
+
+    void returnTicket(const std::string &ticketId) {
+        for (auto &[key, airplane]: flights) {
+            std::string result = airplane.returnTicket(ticketId);
+            if (result.find("Confirmed") != std::string::npos) {
+                std::cout << result << std::endl;
+                return;
+            }
+        }
+        std::cout << "Ticket not found!" << std::endl;
+    }
+
+    void viewTicket(const std::string &ticketId) {
+        for (auto &[key, airplane]: flights) {
+            std::string result = airplane.viewBooking(ticketId);
+            if (result.find("Ticket not found") == std::string::npos) {
+                std::cout << result << std::endl;
+                return;
+            }
+        }
+        std::cout << "Ticket not found!" << std::endl;
+    }
+
+    void viewUserBookings(const std::string &username) {
+        bool found = false;
+        std::cout << "Bookings for user " + username + "\n" << std::endl;
+        for (const auto &[key, airplane]: flights) {
+            std::string result = airplane.viewUserBookings(username);
+            if (!result.empty()) {
+                std::cout << result << std::endl;
+                found = true;
+            }
+        }
+        if (!found) {
+            std::cout << "No bookings found for user " << username << std::endl;
+        }
+    }
+
+    void viewFlightBookings(const std::string &flightDate, const std::string &flightId) {
+        std::string key = flightId + flightDate;
+        if (flights.find(key) != flights.end()) {
+            std::cout << flights.at(key).viewFlightBookings() << std::endl;
+        } else {
+            std::cout << "Flight not found!" << std::endl;
+        }
+    }
+
+    void showHelp() {
+        std::cout << "Available commands:\n";
+        std::cout << "\tcheck <flightDate> <flightId>       - View available seats for a flight\n";
+        std::cout << "\tbook <flightDate> <flightId> <seat> <username> - Book a seat for a user\n";
+        std::cout << "\treturn <ticketId>                  - Return a ticket and refund the user\n";
+        std::cout << "\tview <ticketId>                    - View details of a specific booking\n";
+        std::cout << "\tview username <username>           - View all bookings for a user\n";
+        std::cout << "\tview <flightDate> <flightId>       - View all bookings for a specific flight\n";
+        std::cout << "\thelp                               - Show this help message\n";
+        std::cout << "\texit                               - Exit the console\n\n";
+    }
+
+};
+
 
 int main() {
-    FileReader fileReader("../config.txt");
-    auto flights = fileReader.getFlights();
+    try {
+        FileReader fileReader("../config.txt");
+        auto flights = fileReader.getFlights();
+
+        CLI cli(flights);
+
+        std::string input;
+        while (cli.isRunning() && std::getline(std::cin, input)) {
+            std::cout << std::endl;
+            cli.executeCommand(input);
+        }
+
+        std::cout << "Exiting the console..." << std::endl;
+
+    } catch (const std::exception &e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
     return 0;
 }
+
+
